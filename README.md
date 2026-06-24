@@ -5,6 +5,7 @@ A professional audio mastering tool specifically optimized for AI-generated musi
 ## Features
 
 ### Core Mastering Chain
+- **Start Noise Removal** - Automatically detects and removes noise artifacts at track beginning
 - **Adaptive Fade Completion** - Automatically detects and extends incomplete fades to silence
 - **Intelligent Loudness Normalization** - LUFS-based normalization with configurable targets
 - **Professional Dynamics Processing** - Soft-knee compression with lookahead
@@ -104,13 +105,15 @@ python master_track.py input.wav output.wav --no-air
 | `--fade-seconds` | 5.0 | Maximum fade extension duration |
 | `--stereo-width` | 1.0 | Stereo width (0.5-1.5: <1.0=narrow, >1.0=wide) |
 | `--no-air` | false | Disable high-frequency enhancement |
+| `--no-start-trim` | false | Disable automatic start noise removal |
 
 ## How It Works
 
 ### Processing Chain
 
 1. **Load & Analyze** - Read audio file, measure original LUFS and peak
-2. **Highpass Filter** - Remove sub-bass rumble below 35Hz
+2. **Start Noise Detection** - Check for and remove initial artifacts (common in AI-generated audio)
+3. **Highpass Filter** - Remove sub-bass rumble below 35Hz
 3. **Muddiness Detection** - Analyze 250-400Hz range across multiple segments
 4. **Mud Cleanup** (if needed) - Apply gentle dip around 320Hz
 5. **Stereo Width Adjustment** - Mid-side processing (if configured)
@@ -131,6 +134,24 @@ The tool uses a sophisticated multi-stage approach:
 4. **Rate Calculation** - Measure dB/second from detected fade start
 5. **Extension Calculation** - Determine duration needed to reach -70dB silence
 6. **Limiter** - Cap at user-specified maximum duration
+
+### Start Noise Detection Algorithm
+
+AI-generated audio (especially from Suno) sometimes begins with artifacts:
+
+**Common Pattern:**
+1. Brief noise burst (5-20ms) at moderate level (-30 to -20dB)
+2. Near-silence period (100-400ms below -80dB)
+3. Music gradually fades in
+
+**Detection Process:**
+1. **Window Analysis** - Divide first 600ms into 10ms windows
+2. **Level Measurement** - Calculate RMS for each window
+3. **Pattern Matching** - Detect burst → silence → rise pattern
+4. **Trim Point** - Find where sustained music begins (above -70dB)
+5. **Fade-In** - Apply 10ms fade-in to trimmed audio for smooth start
+
+The algorithm is conservative and only trims when clear artifacts are detected.
 
 ### Reverb Tail Generation
 
@@ -168,6 +189,9 @@ python master_track.py suno_track.wav mastered.wav --lufs -12 --max-gain 4
 
 # Subtle enhancement with wider stereo
 python master_track.py suno_track.wav mastered.wav --stereo-width 1.1
+
+# Keep original start (disable noise removal)
+python master_track.py suno_track.wav mastered.wav --no-start-trim
 ```
 
 ### YouTube Content
@@ -214,6 +238,7 @@ MIT License - feel free to use and modify for your projects.
 ## Acknowledgments
 
 Built specifically to enhance AI-generated music from platforms like Suno, addressing common issues like:
+- Initial noise artifacts and glitches
 - Incomplete fades to silence
 - Muddy low-mids
 - Lack of high-frequency detail

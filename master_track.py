@@ -322,6 +322,120 @@ def adjust_stereo_width(audio, width=1.0):
     return np.column_stack([left, right])
 
 
+def detect_start_noise(audio, sr, max_check_duration=0.6):
+    """
+    Detect noise artifacts at the start of Suno-generated tracks.
+    
+    Common pattern:
+    - Brief noise burst (5-10ms) at moderate/high level
+    - Followed by very low level or near-silence
+    - Then music gradually starts
+    
+    Returns: sample index where actual content begins (0 if no noise detected)
+    """
+    mono = np.mean(audio, axis=1)
+    
+    # Analyze first max_check_duration seconds
+    check_samples = min(int(sr * max_check_duration), len(mono))
+    analysis_region = mono[:check_samples]
+    
+    # Split into small windows (10ms)
+    window_size = int(sr * 0.01)
+    num_windows = check_samples // window_size
+    
+    if num_windows < 10:
+        return 0  # Too short to analyze
+    
+    # Calculate RMS for each window
+    rms_values = []
+    for i in range(num_windows):
+        start = i * window_size
+        end = min((i + 1) * window_size, len(analysis_region))
+        window = analysis_region[start:end]
+        rms = np.sqrt(np.mean(window ** 2))
+        rms_values.append(rms)
+    
+    # Convert to dB
+    rms_db = [linear_to_db(rms) if rms > 0 else -120.0 for rms in rms_values]
+    
+    # Pattern detection: burst -> silence -> gradual rise
+    # Check if first window is much louder than what follows
+    first_window_db = rms_db[0]
+    
+    # Look for near-silence period after first window
+    if first_window_db > -40.0:  # First window has content
+        # Check if next few windows drop significantly
+        next_windows = rms_db[1:min(5, len(rms_db))]
+        if next_windows:
+            min_next = min(next_windows)
+            avg_next = np.mean(next_windows)
+            
+            # If drops to near-silence (below -80dB)
+            if avg_next < -80.0 and min_next < -90.0:
+                # Find where music actually starts (sustained rise)
+                for i in range(5, min(60, len(rms_db))):
+                    # Look for sustained level above -70dB
+                    if i < len(rms_db) - 3:
+                        window_avg = np.mean(rms_db[i:min(i+3, len(rms_db))])
+                        if window_avg > -70.0:
+                            # Music starts here, trim everything before
+                            trim_point = i * window_size
+                            return trim_point
+                
+                # If we found silence but no clear music start,
+                # trim at least past the silence
+                for i in range(1, min(50, len(rms_db))):
+                    if rms_db[i] > -90.0:
+                        trim_point = max(0, (i - 1) * window_size)
+                        return trim_point
+    
+    # Alternative pattern: initial burst followed by drop then immediate rise
+    for i in range(1, min(10, len(rms_db) - 2)):
+        level_jump = rms_db[i] - rms_db[i-1]
+        
+        # Significant upward jump
+        if level_jump > 15.0:
+            # Verify sustained
+            if i < len(rms_db) - 2:
+                avg_after = np.mean(rms_db[i:min(i+5, len(rms_db))])
+                avg_before = np.mean(rms_db[max(0, i-3):i])
+                
+                if avg_after - avg_before > 12.0:
+                    trim_point = i * window_size
+                    return trim_point
+    
+    return 0  # No noise detected
+
+
+def remove_start_noise(audio, sr, trim_samples):
+    """
+    Remove noise from the start and add a short fade-in.
+    
+    Args:
+        audio: Audio array
+        sr: Sample rate
+        trim_samples: Number of samples to trim from start
+    
+    Returns: Trimmed audio with fade-in
+    """
+    if trim_samples <= 0:
+        return audio
+    
+    # Trim the noise
+    trimmed = audio[trim_samples:]
+    
+    # Add short fade-in (10ms) to avoid click
+    fade_samples = int(sr * 0.01)
+    fade_samples = min(fade_samples, len(trimmed))
+    
+    fade_curve = np.linspace(0.0, 1.0, fade_samples)
+    fade_curve = fade_curve ** 0.5  # Slight curve
+    
+    trimmed[:fade_samples] *= fade_curve[:, np.newaxis]
+    
+    return trimmed
+
+
 def process_file(
     input_file,
     output_file,
@@ -329,7 +443,8 @@ def process_file(
     max_gain_db=MAX_GAIN_DB,
     fade_seconds=4.0,
     stereo_width=1.0,
-    add_air=True
+    add_air=True,
+    trim_start=True
 ):
     print(f"\nProcessing {input_file}")
 
@@ -339,6 +454,16 @@ def process_file(
         audio = np.column_stack(
             [audio, audio]
         )
+
+    # Check for and remove start noise (common in Suno tracks)
+    if trim_start:
+        trim_samples = detect_start_noise(audio, sr)
+        if trim_samples > 0:
+            trim_ms = (trim_samples / sr) * 1000
+            print(
+                f"Detected start noise, trimming {trim_ms:.1f}ms"
+            )
+            audio = remove_start_noise(audio, sr, trim_samples)
 
     meter = pyln.Meter(sr)
 
@@ -961,6 +1086,12 @@ def main():
         help="Disable high-frequency air enhancement"
     )
 
+    parser.add_argument(
+        "--no-start-trim",
+        action="store_true",
+        help="Disable automatic removal of start noise artifacts"
+    )
+
     args = parser.parse_args()
 
     process_file(
@@ -970,7 +1101,8 @@ def main():
         args.max_gain,
         args.fade_seconds,
         args.stereo_width,
-        not args.no_air
+        not args.no_air,
+        not args.no_start_trim
     )
 
 
