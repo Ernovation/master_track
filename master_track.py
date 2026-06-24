@@ -693,6 +693,14 @@ def limiter(audio, sr, ceiling_db=-1.0, lookahead_ms=5.0, release_ms=100.0):
 
 
 def hard_clip_protection(audio):
+    """Final safety limiter to prevent clipping.
+    
+    Clips any samples exceeding ±0.999 (-0.01 dBFS).
+    This is the last line of defense against clipping in the output file.
+    
+    Applied after all processing including fade completion to ensure
+    no stage of the mastering chain can introduce clipping.
+    """
     return np.clip(
         audio,
         -0.999,
@@ -1459,8 +1467,7 @@ def process_file(
         release_ms=100.0
     )
 
-    audio = hard_clip_protection(audio)
-
+    # Phase 8: Fade completion (if needed)
     if needs_fade_completion(audio, sr):
         print(
             "Fade appears unfinished, "
@@ -1472,6 +1479,14 @@ def process_file(
             sr,
             tail_seconds=fade_seconds
         )
+    
+    # Final safety: ensure no clipping can occur
+    # Check if any samples exceed safe limits
+    pre_clip_peak = np.max(np.abs(audio))
+    if pre_clip_peak > 0.999:
+        print(f"  Clipping protection: peak {linear_to_db(pre_clip_peak):.2f} dBFS reduced to -0.01 dBFS")
+    
+    audio = hard_clip_protection(audio)
 
     final_lufs = (
         meter.integrated_loudness(audio)
@@ -1701,6 +1716,13 @@ def generate_reverb_tail(
     fade_curve = np.linspace(1.0, 0.0, len(tail))
     fade_curve = fade_curve ** 1.5  # Gentle exponential curve
     tail *= fade_curve[:, np.newaxis]
+    
+    # Safety: ensure tail doesn't exceed source peak
+    # (prevents clipping during crossfade)
+    tail_peak = np.max(np.abs(tail))
+    source_peak = np.max(np.abs(source))
+    if tail_peak > source_peak:
+        tail *= (source_peak / tail_peak)
 
     return tail
 
