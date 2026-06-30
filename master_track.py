@@ -1137,12 +1137,13 @@ def should_apply_harshness_correction(audio, sr, harsh_regions):
 
 def detect_start_noise(audio, sr, max_check_duration=0.6):
     """
-    Detect noise artifacts at the start of Suno-generated tracks.
+    Detect noise artifacts at the start of tracks.
     
-    Common pattern:
-    - Brief noise burst (5-10ms) at moderate/high level
-    - Followed by very low level or near-silence
-    - Then music gradually starts
+    Detects various noise patterns:
+    - Initial burst followed by silence then music
+    - Sustained low-level noise before music starts
+    - Pops, clicks, or static at the beginning
+    - Level jumps indicating transition from noise to music
     
     Returns: sample index where actual content begins (0 if no noise detected)
     """
@@ -1159,20 +1160,26 @@ def detect_start_noise(audio, sr, max_check_duration=0.6):
     if num_windows < 10:
         return 0  # Too short to analyze
     
-    # Calculate RMS for each window
+    # Calculate RMS and peak for each window
     rms_values = []
+    peak_values = []
     for i in range(num_windows):
         start = i * window_size
         end = min((i + 1) * window_size, len(analysis_region))
         window = analysis_region[start:end]
         rms = np.sqrt(np.mean(window ** 2))
+        peak = np.max(np.abs(window))
         rms_values.append(rms)
+        peak_values.append(peak)
     
     # Convert to dB
     rms_db = [linear_to_db(rms) if rms > 0 else -120.0 for rms in rms_values]
+    peak_db = [linear_to_db(peak) if peak > 0 else -120.0 for peak in peak_values]
     
-    # Pattern detection: burst -> silence -> gradual rise
-    # Check if first window is much louder than what follows
+    # Collect all pattern matches: list of (trim_samples, pattern_name, description)
+    candidates = []
+    
+    # Pattern 1: Initial burst followed by silence then music
     first_window_db = rms_db[0]
     
     # Look for near-silence period after first window
@@ -1193,16 +1200,18 @@ def detect_start_noise(audio, sr, max_check_duration=0.6):
                         if window_avg > -70.0:
                             # Music starts here, trim everything before
                             trim_point = i * window_size
-                            return trim_point
+                            if not any(c[1] == 'Pattern 1a' for c in candidates):
+                                candidates.append((trim_point, 'Pattern 1a', 'Initial burst followed by silence, music starts'))
                 
                 # If we found silence but no clear music start,
                 # trim at least past the silence
                 for i in range(1, min(50, len(rms_db))):
                     if rms_db[i] > -90.0:
                         trim_point = max(0, (i - 1) * window_size)
-                        return trim_point
+                        if not any(c[1] == 'Pattern 1b' for c in candidates):
+                            candidates.append((trim_point, 'Pattern 1b', 'Initial burst followed by silence, trim past silence'))
     
-    # Alternative pattern: initial burst followed by drop then immediate rise
+    # Pattern 2: Large level jump indicating transition to music
     for i in range(1, min(10, len(rms_db) - 2)):
         level_jump = rms_db[i] - rms_db[i-1]
         
@@ -1215,9 +1224,202 @@ def detect_start_noise(audio, sr, max_check_duration=0.6):
                 
                 if avg_after - avg_before > 12.0:
                     trim_point = i * window_size
-                    return trim_point
+                    candidates.append((trim_point, 'Pattern 2', f'Large level jump ({level_jump:.1f}dB) to music'))
     
-    return 0  # No noise detected
+    # Pattern 3: Sustained low-level noise before music
+    # Find where sustained musical content actually starts
+    if len(rms_db) >= 15:
+        # Calculate median level of later portion (assumed to be music)
+        music_section_start = min(10, len(rms_db) - 5)
+        music_median = np.median(rms_db[music_section_start:])
+        
+        # Look for first window where level approaches music level
+        threshold_db = music_median - 10.0  # Within 10dB of music level
+        
+        for i in range(min(15, len(rms_db))):
+            # Check if we've reached sustained music level
+            if i < len(rms_db) - 2:
+                # Need at least 3 consecutive windows near music level
+                window_avg = np.mean(rms_db[i:min(i+3, len(rms_db))])
+                if window_avg >= threshold_db:
+                    # Check that preceding windows are significantly quieter
+                    if i >= 2:
+                        prev_avg = np.mean(rms_db[max(0, i-2):i])
+                        if prev_avg < threshold_db - 6.0:  # At least 6dB quieter
+                            # Trim back to the start of the quiet section
+                            candidates.append((max(0, (i - 1) * window_size), 'Pattern 3', 'Sustained low-level noise before music'))
+    
+    # Pattern 4: Very quiet start (below -60dB) followed by normal level
+    # This catches noise that's just low-level hiss or hum
+    if len(rms_db) >= 10:
+        # Check if first 1-3 windows are unusually quiet
+        first_few = rms_db[:min(3, len(rms_db))]
+        avg_first = np.mean(first_few)
+        
+        if avg_first < -60.0:  # Very quiet start
+            # Find where level rises to normal
+            for i in range(1, min(10, len(rms_db))):
+                if rms_db[i] > -50.0:  # Normal level reached
+                    # Check if it stays there
+                    if i < len(rms_db) - 2:
+                        sustained = np.mean(rms_db[i:min(i+3, len(rms_db))])
+                        if sustained > -50.0:
+                            candidates.append((i * window_size, 'Pattern 4', 'Very quiet start (hiss/hum) followed by normal level'))
+    
+    # Pattern 5: High peak but low RMS in first window (click/pop)
+    if len(peak_db) > 0 and len(rms_db) > 0:
+        first_crest = peak_db[0] - rms_db[0]
+        if first_crest > 20.0 and peak_db[0] > -30.0:  # High crest factor = transient
+            # Check if following windows are more normal
+            if len(rms_db) >= 3:
+                following_avg = np.mean(rms_db[1:3])
+                if following_avg > rms_db[0] + 10.0:  # Following is much louder
+                    candidates.append((window_size, 'Pattern 5', 'Click/pop in first window (high crest factor)'))
+    
+    # Pattern 6: Very short noise in first 40-50ms (common Suno artifact)
+    # Compare first 4-5 windows (40-50ms) against windows 5-10
+    if len(rms_db) >= 10:
+        # First section: first 4 windows (40ms)
+        first_section = rms_db[:4]
+        first_avg = np.mean(first_section)
+        first_max = np.max(first_section)
+        first_std = np.std(first_section)
+        
+        # Following section: windows 5-10 (50-100ms after start)
+        following_section = rms_db[5:10]
+        following_avg = np.mean(following_section)
+        following_std = np.std(following_section)
+        
+        # Music section: windows 10+ 
+        if len(rms_db) > 15:
+            music_section = rms_db[10:15]
+            music_avg = np.mean(music_section)
+        else:
+            music_avg = following_avg
+        
+        # Detection criteria for very short start noise:
+        # 1. First section is notably different (quieter OR spectrally different)
+        # 2. Following section is more consistent and closer to music level
+        
+        # Check if first 40ms is significantly quieter than following
+        if first_avg < following_avg - 3.0:  # At least 3dB quieter
+            # And following is closer to music level
+            if abs(following_avg - music_avg) < abs(first_avg - music_avg):
+                # Trim up to the start of the following section
+                if not any(c[1].startswith('Pattern 6') for c in candidates):
+                    candidates.append((4 * window_size, 'Pattern 6a', 'First 40ms quieter than following'))
+        
+        # Check if first 40ms has different characteristics (more variable)
+        # while following is more stable
+        if first_std > 3.0 and following_std < first_std / 2:
+            # First part is noisy/inconsistent, following is stable
+            if following_avg > first_avg - 5.0:  # Following isn't much quieter
+                if not any(c[1].startswith('Pattern 6') for c in candidates):
+                    candidates.append((4 * window_size, 'Pattern 6b', 'First 40ms more variable/inconsistent'))
+        
+        # Check if first 40ms is notably louder but brief (burst noise)
+        if first_max > following_avg + 6.0:  # First has peaks 6dB+ above following
+            # But music section is similar to following (so first is anomalous)
+            if abs(music_avg - following_avg) < 4.0:
+                if not any(c[1].startswith('Pattern 6') for c in candidates):
+                    candidates.append((4 * window_size, 'Pattern 6c', 'First 40ms louder burst noise'))
+    
+    # Pattern 7: Any oddity in first 20ms compared to rest
+    # More aggressive check specifically for first 2 windows (20ms)
+    if len(rms_db) >= 8:
+        first_20ms = np.mean(rms_db[:2])
+        next_60ms = np.mean(rms_db[2:8])
+        
+        # If first 20ms is weird compared to next 60ms
+        diff = abs(first_20ms - next_60ms)
+        
+        if diff > 6.0:  # Significant difference
+            # Check consistency of just the next section (don't include music start)
+            next_section_std = np.std(rms_db[2:8])
+            if next_section_std < 5.0:  # Next section is relatively stable
+                candidates.append((2 * window_size, 'Pattern 7', 'Oddity in first 20ms compared to rest'))
+    
+    # Pattern 8: Noise before silence (first section LOUDER than following)
+    # Specifically for Suno artifacts: moderate noise followed by silence
+    if len(rms_db) >= 6:
+        first_20ms = np.mean(rms_db[:2])
+        next_40ms = np.mean(rms_db[2:6])
+        
+        # If first part is much louder than what follows
+        if first_20ms > next_40ms + 10.0:  # First 20ms is 10dB+ louder
+            # And the following part is very quiet (silence-like)
+            if next_40ms < -60.0:  # Following is essentially silence
+                if not any(c[1].startswith('Pattern 8') for c in candidates):
+                    candidates.append((2 * window_size, 'Pattern 8a', 'First 20ms louder noise before silence'))
+        
+        # Also check for 40ms version (more generous)
+        if len(rms_db) >= 8:
+            first_40ms = np.mean(rms_db[:4])
+            next_60ms = np.mean(rms_db[4:10])
+            
+            if first_40ms > next_60ms + 10.0:  # First 40ms is 10dB+ louder
+                if next_60ms < -60.0:  # Following is essentially silence
+                    if not any(c[1].startswith('Pattern 8') for c in candidates):
+                        candidates.append((4 * window_size, 'Pattern 8b', 'First 40ms louder noise before silence'))
+    
+    # Pattern 9: Comprehensive Suno multi-segment noise removal
+    # Scan forward and find where the actual song fade-in begins
+    # Remove ALL consecutive noise segments before that point
+    
+    # Define thresholds
+    FADE_IN_THRESHOLD = -80.0  # Song fade-ins typically start below this
+    NOISE_MIN_LEVEL = -80.0    # Noise is typically louder than this
+    STABILITY_WINDOW = 5       # Number of windows to check for stability
+    
+    # Find the first point where we have sustained quiet audio (fade-in start)
+    fade_in_start = None
+    
+    for i in range(len(rms_db) - STABILITY_WINDOW):
+        # Check if this window and several following are below fade-in threshold
+        window_section = rms_db[i:i + STABILITY_WINDOW]
+        
+        # All windows in this section should be reasonably quiet
+        if all(level < FADE_IN_THRESHOLD for level in window_section):
+            # Check that this isn't just a momentary dip
+            # The section should be relatively stable (not wildly varying)
+            section_std = np.std(window_section)
+            
+            # If this is a stable quiet section, it's likely the fade-in
+            if section_std < 8.0:  # Relatively consistent
+                fade_in_start = i
+                break
+    
+    # If we found a fade-in point, check if there's noise before it
+    if fade_in_start is not None and fade_in_start > 0:
+        # Check if the section before fade-in contains noise
+        # (any windows louder than the fade-in threshold)
+        pre_fade_section = rms_db[:fade_in_start]
+        
+        # Count how many windows are louder than fade-in threshold
+        noisy_windows = sum(1 for level in pre_fade_section if level > NOISE_MIN_LEVEL)
+        
+        # If more than 30% of pre-fade windows are louder than fade-in level
+        if noisy_windows > len(pre_fade_section) * 0.3:
+            # This is noise that should be removed
+            trim_samples = fade_in_start * window_size
+            trim_ms = (trim_samples / sr) * 1000
+            
+            # Only trim if it's a reasonable amount (< 200ms)
+            if trim_ms < 200:
+                candidates.append((trim_samples, 'Pattern 9', 'Comprehensive multi-segment noise before fade-in'))
+    
+    # Select the pattern that trims the most (longest noise detection)
+    if not candidates:
+        return 0
+    
+    # Find the maximum trim amount
+    best_trim, best_pattern, best_desc = max(candidates, key=lambda x: x[0])
+    
+    # Log which pattern was selected
+    print(f"[Noise Detection] {best_pattern}: {best_desc}")
+    print(f"[Noise Detection] Selected longest trim: {(best_trim / sr) * 1000:.1f}ms")
+    
+    return best_trim
 
 
 def remove_start_noise(audio, sr, trim_samples):

@@ -1,0 +1,30 @@
+{
+  "name": "Pop",
+  "description": "Modern Pop - Balanced frequency response with slight vocal presence boost",
+  "target_curve": [
+    {"frequency": 20, "db": 0.5},
+    {"frequency": 40, "db": 0.5},
+    {"frequency": 60, "db": 0.5},
+    {"frequency": 80, "db": 0.5},
+    {"frequency": 100, "db": 0.0},
+    {"frequency": 150, "db": 0.0},
+    {"frequency": 200, "db": -0.5},
+    {"frequency": 300, "db": -0.8},
+    {"frequency": 400, "db": -0.8},
+    {"frequency": 500, "db": -0.5},
+    {"frequency": 800, "db": 0.0},
+    {"frequency": 1000, "db": 0.0},
+    {"frequency": 1500, "db": 0.0},
+    {"frequency": 2000, "db": 0.5},
+    {"frequency": 3000, "db": 1.0},
+    {"frequency": 4000, "db": 1.0},
+    {"frequency": 6000, "db": 0.5},
+    {"frequency": 8000, "db": 0.8},
+    {"frequency": 10000, "db": 1.0},
+    {"frequency": 12000, "db": 1.0},
+    {"frequency": 16000, "db": 0.8},
+    {"frequency": 20000, "db": 0.5}
+  ],
+  "max_boost_db": 2.0,
+  "max_cut_db": 2.0
+}

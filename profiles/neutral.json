@@ -1,0 +1,30 @@
+{
+  "name": "Neutral",
+  "description": "Neutral reference - Flat response for well-balanced material",
+  "target_curve": [
+    {"frequency": 20, "db": 0.0},
+    {"frequency": 40, "db": 0.0},
+    {"frequency": 60, "db": 0.0},
+    {"frequency": 80, "db": 0.0},
+    {"frequency": 100, "db": 0.0},
+    {"frequency": 150, "db": 0.0},
+    {"frequency": 200, "db": 0.0},
+    {"frequency": 300, "db": 0.0},
+    {"frequency": 400, "db": 0.0},
+    {"frequency": 500, "db": 0.0},
+    {"frequency": 800, "db": 0.0},
+    {"frequency": 1000, "db": 0.0},
+    {"frequency": 1500, "db": 0.0},
+    {"frequency": 2000, "db": 0.0},
+    {"frequency": 3000, "db": 0.0},
+    {"frequency": 4000, "db": 0.0},
+    {"frequency": 6000, "db": 0.0},
+    {"frequency": 8000, "db": 0.0},
+    {"frequency": 10000, "db": 0.0},
+    {"frequency": 12000, "db": 0.0},
+    {"frequency": 16000, "db": 0.0},
+    {"frequency": 20000, "db": 0.0}
+  ],
+  "max_boost_db": 2.0,
+  "max_cut_db": 2.0
+}
